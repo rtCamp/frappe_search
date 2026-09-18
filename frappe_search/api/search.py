@@ -504,6 +504,46 @@ def process_results(start, limit, doctype, allowed_doctypes, text):
         allowed_doctypes=allowed_doctypes,
     )
 
+    if not results:
+        return []
+
+    # Group results by doctype for batch processing
+    results_by_doctype = {}
+    for result in results:
+        if result.doctype not in results_by_doctype:
+            results_by_doctype[result.doctype] = []
+        results_by_doctype[result.doctype].append(result)
+
+    # Batch check existence and permissions per doctype
+    valid_docs = set()
+    for dt, dt_results in results_by_doctype.items():
+        names = [r.name for r in dt_results]
+        try:
+            # Batch fetch with permission check built-in (respects permission_query_conditions)
+            existing = frappe.get_all(
+                dt,
+                filters={"name": ["in", names]},
+                fields=["name"],
+                limit_page_length=None  # Get all matching records
+            )
+            # Optimize f-string formatting in generator
+            valid_docs.update(dt + ":" + d.name for d in existing)
+        except frappe.PermissionError:
+            # User has no access to this doctype at all
+            continue
+        except (frappe.DoesNotExistError, AttributeError):
+            # Handle cases where doctype might not exist or has attribute issues
+            frappe.clear_messages()
+            continue
+        except Exception as e:
+            # Log unexpected exceptions for debugging
+            frappe.log_error(
+                f"Unexpected error in batch permission check for {dt}: {str(e)}",
+                "Search Batch Permission Error"
+            )
+            frappe.clear_messages()
+            continue
+
     processed_results = []
 
     for result in results:
@@ -517,9 +557,8 @@ def process_results(start, limit, doctype, allowed_doctypes, text):
         # and split by a <mark>.
         fuzzy = fuzzy_search(text, content, return_marked_string=True)
         if fuzzy["score"] > 0:
-            if not frappe.db.exists(result.doctype, result.name):
-                continue
-            if not frappe.has_permission(result.doctype, "read", result.name):
+            doc_key = f"{result.doctype}:{result.name}"
+            if doc_key not in valid_docs:
                 continue
             result.score = fuzzy["score"]
             result.content = escape_html(content).replace("|||", "<br>")
